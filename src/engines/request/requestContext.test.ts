@@ -20,7 +20,7 @@ describe('assembleAssistantContext', () => {
       minimumBreakpointTokens: 1024,
       requestApplication: {
         status: 'explicit_anthropic_cache_control' as const,
-        label: 'Anthropic system prefix cache_control breakpoints sent',
+        label: 'Anthropic automatic conversation cache plus explicit prefix breakpoints sent',
         sendsExplicitCacheControl: true
       },
       breakpoints: []
@@ -166,6 +166,52 @@ describe('assembleAssistantContext', () => {
     ]);
   });
 
+  it('places runtime clock context immediately before the latest user message', () => {
+    const context = assembleAssistantContext({
+      systemPromptParts: [{
+        name: 'runtime_clock_context',
+        layer: 'context',
+        content: '当前本地完整时间：2026-07-22 21:15:30\n当前时区：Asia/Shanghai'
+      }],
+      messages: [
+        createUserMessage({ id: 'user-old', content: '昨天那个先放着', timestamp: 1 }),
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: '好。',
+          timestamp: 2
+        },
+        createUserMessage({ id: 'user-new', content: '今晚继续吗', timestamp: 3 })
+      ]
+    });
+
+    expect(context.segments[0]?.kind).toBe('conversation');
+    expect(context.segments[0]?.messages).toEqual([
+      {
+        role: 'user',
+        content: '昨天那个先放着'
+      },
+      {
+        role: 'assistant',
+        content: '好。',
+        thinkingText: undefined,
+        toolCalls: undefined
+      },
+      {
+        role: 'user',
+        content: expect.stringContaining('[本轮请求上下文，不是用户原话]'),
+        promptPartName: 'runtime_clock_context',
+        promptPartLayer: 'context'
+      },
+      {
+        role: 'user',
+        content: '今晚继续吗'
+      }
+    ]);
+    expect(context.segments[0]?.messages[2]?.content).toContain('2026-07-22 21:15:30');
+    expect(context.segments[0]?.messages[2]?.content).toContain('Asia/Shanghai');
+  });
+
   it('builds a memory segment from normalized memory lines', () => {
     const context = assembleAssistantContext({
       messages: [createUserMessage()],
@@ -209,9 +255,8 @@ describe('assembleAssistantContext', () => {
         content: expect.stringContaining('[跨对话前文片段]')
       }
     ]);
-    expect(semanticRecall?.messages[0]?.content).toContain('你们不是第一次认识');
-    expect(semanticRecall?.messages[0]?.content).toContain('表达方式、语气');
-    expect(semanticRecall?.messages[0]?.content).toContain('在之前的旧对话里，用户曾经和你聊过：');
+    expect(semanticRecall?.messages[0]?.content).toContain('不要机械复述');
+    expect(semanticRecall?.messages[0]?.content).not.toContain('在之前的旧对话里，用户曾经和你聊过：');
     expect(semanticRecall?.messages[0]?.content).not.toContain('2026-05-20');
     expect(semanticRecall?.messages[0]?.content).not.toContain('约3个月前');
     expect(semanticRecall?.messages[0]?.content).not.toContain('candidateId');
@@ -268,9 +313,8 @@ describe('assembleAssistantContext', () => {
 
     const summary = context.segments.find((segment) => segment.kind === 'conversation_summary');
     expect(summary?.messages[0]?.content).toContain('[跨对话总结]');
-    expect(summary?.messages[0]?.content).toContain('不是逐字原文，也不是硬规则');
+    expect(summary?.messages[0]?.content).toContain('不是逐字原文也不是硬规则');
     expect(summary?.messages[0]?.content).toContain('对象: 用户 ↔ Nova');
-    expect(summary?.messages[0]?.content).toContain('人称残留');
     expect(summary?.messages[0]?.content).toContain('对象标签');
     expect(summary?.messages[0]?.content).not.toContain('summaryId');
     expect(summary?.messages[0]?.content).not.toContain('sourceChars');
@@ -895,6 +939,66 @@ describe('assembleAssistantContext', () => {
             summary: '已读取 index.html'
           }
         }
+      },
+      {
+        role: 'user',
+        content: '继续',
+        toolCalls: undefined
+      }
+    ]);
+  });
+
+  it('does not trust a stale running ledger result as a settled provider exchange', () => {
+    const context = assembleAssistantContext({
+      messages: [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: '我先读一下。',
+          timestamp: 1,
+          nativeToolCalls: [{
+            id: 'call-1',
+            name: 'readProjectFile',
+            argumentsText: '{"filePath":"index.html"}'
+          }]
+        },
+        {
+          id: 'user-1',
+          role: 'user',
+          content: '继续',
+          timestamp: 2
+        }
+      ],
+      toolLedger: [{
+        id: 'assistant-1:tool-ledger:1',
+        toolCallId: 'call-1',
+        assistantMessageId: 'assistant-1',
+        order: 0,
+        toolName: 'readProjectFile',
+        argumentsText: '{"filePath":"index.html"}',
+        sourceSpan: {
+          transport: 'native',
+          index: 0
+        },
+        resultMessageId: 'tool-running',
+        resultToolName: 'readProjectFile',
+        resultStatus: 'running',
+        resultIsError: false,
+        resultSourceMessageId: 'assistant-1',
+        resultStructuredPayload: {
+          kind: 'readProjectFile',
+          status: 'running',
+          summary: '正在读取 index.html'
+        }
+      }]
+    });
+
+    const conversation = context.segments.find((segment) => segment.kind === 'conversation');
+    expect(conversation?.messages).toEqual([
+      {
+        role: 'assistant',
+        content: '我先读一下。',
+        toolCalls: undefined
       },
       {
         role: 'user',

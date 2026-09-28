@@ -67,6 +67,10 @@ import {
   finishChatSendPerformanceTrace,
   recordChatSendPerformanceMark
 } from './chatSendPerformanceTrace';
+import {
+  ChatReplyPersistenceError,
+  persistChatReplyBoundary
+} from './chatReplyPersistence';
 
 type RequestReplyArgs = {
   ui: Pick<
@@ -88,6 +92,7 @@ type RequestReplyArgs = {
     | 'replaceConversationMessages'
     | 'setConversationTask'
     | 'updateMessage'
+    | 'persistToDb'
   >;
   executeToolActions: (
     conversationId: string,
@@ -107,10 +112,23 @@ type RequestReplyArgs = {
   refreshRequestSnapshot?: () => ChatReplyRequestSnapshot;
   loadSemanticRecallConversations?: (conversationIds: string[]) => Promise<ChatReplyRequestSnapshot['conversations']>;
   preferredOpenAiToolHistoryMode?: OpenAiToolHistoryMode;
-  toolFollowupDepth?: number;
-  lengthFollowupDepth?: number;
-  toolPreparationRetryDepth?: number;
-  taskActivationEnforcement?: TaskActivationEnforcement | null;
+  continuation?: ChatReplyContinuationState;
+};
+
+type ChatReplyContinuationState = {
+  toolExchangeDepth: number;
+  seenToolExchangeFingerprints: readonly string[];
+  lengthRecoveryDepth: number;
+  preparationRetryDepth: number;
+  taskActivationEnforcement: TaskActivationEnforcement | null;
+};
+
+const INITIAL_CHAT_REPLY_CONTINUATION_STATE: ChatReplyContinuationState = {
+  toolExchangeDepth: 0,
+  seenToolExchangeFingerprints: [],
+  lengthRecoveryDepth: 0,
+  preparationRetryDepth: 0,
+  taskActivationEnforcement: null
 };
 
 export type ChatReplyRunResult = {
@@ -118,6 +136,10 @@ export type ChatReplyRunResult = {
 };
 
 export type RequestReplyChatPort = RequestReplyArgs['chat'];
+
+class ChatReplyContinuation {
+  constructor(readonly next: RequestReplyArgs) {}
+}
 
 async function readDesktopLocalHostPromptState(): Promise<AssistantToolContext['desktopLocalHost']> {
   const bridge = getDesktopLocalHostBridge();
@@ -239,24 +261,30 @@ function settleConversationTaskAfterAssistantTurn(args: {
   );
 }
 
-export async function requestReply({
+async function requestReplyRound({
   ui,
   chat,
   executeToolActions,
   conversationId,
   writableConversation,
   collaboratorId,
-  messages: replyBaselineMessages,
-  requestMessages = replyBaselineMessages,
+  messages,
+  requestMessages = messages,
   requestSnapshot,
   refreshRequestSnapshot,
   loadSemanticRecallConversations,
   preferredOpenAiToolHistoryMode,
-  toolFollowupDepth = 0,
-  lengthFollowupDepth = 0,
-  toolPreparationRetryDepth = 0,
-  taskActivationEnforcement = null
+  continuation = INITIAL_CHAT_REPLY_CONTINUATION_STATE
 }: RequestReplyArgs): Promise<ChatReplyRunResult> {
+  const {
+    toolExchangeDepth,
+    seenToolExchangeFingerprints,
+    lengthRecoveryDepth,
+    preparationRetryDepth,
+    taskActivationEnforcement
+  } = continuation;
+  await persistChatReplyBoundary(chat.persistToDb, 'before-request');
+  recordChatSendPerformanceMark(conversationId, '聊天发送 · 用户消息已安全落盘');
   const activeRequestSnapshot = refreshRequestSnapshot?.() ?? requestSnapshot;
   const {
     collaboratorForReply,
@@ -267,14 +295,14 @@ export async function requestReply({
   } = buildReplyToolContext({
     snapshot: activeRequestSnapshot,
     collaboratorId,
-    messages: replyBaselineMessages
+    messages
   });
   const effectiveToolContext = applyTaskActivationEnforcement(
-    relaxToolEnforcementForFollowup(toolContext, toolFollowupDepth),
+    relaxToolEnforcementForFollowup(toolContext, toolExchangeDepth),
     taskActivationEnforcement
   );
   recordChatSendPerformanceMark(conversationId, '聊天发送 · 工具上下文就绪', {
-    messageCount: replyBaselineMessages.length,
+    messageCount: messages.length,
     extra: [
       `visible tools ${resolveAvailablePolarisToolNames(effectiveToolContext).size}`,
       `mcp servers ${effectiveToolContext.mcpServers?.length ?? 0}`
@@ -509,7 +537,7 @@ export async function requestReply({
       if (shouldRequestLengthFollowup({
         reply,
         isTruncatedToolOutput: toolOutcome.truncated === true,
-        depth: lengthFollowupDepth
+        depth: lengthRecoveryDepth
       })) {
         const recoveryOutcomes = await executeRecoverableTruncatedToolActions({
           executeToolActions,
@@ -531,7 +559,7 @@ export async function requestReply({
         });
         throwIfAborted(streaming.controller.signal);
         const latestMessages = chat.getConversationMessages(conversationId);
-        return requestReply({
+        throw new ChatReplyContinuation({
           ui,
           chat,
           executeToolActions,
@@ -546,16 +574,17 @@ export async function requestReply({
           requestSnapshot: refreshRequestSnapshot?.() ?? activeRequestSnapshot,
           refreshRequestSnapshot,
           loadSemanticRecallConversations,
-          toolFollowupDepth,
-          lengthFollowupDepth: lengthFollowupDepth + 1,
-          toolPreparationRetryDepth
+          continuation: {
+            ...continuation,
+            lengthRecoveryDepth: lengthRecoveryDepth + 1
+          }
         });
       }
 
-      if (toolPreparationRetryDepth < 1) {
+      if (preparationRetryDepth < 1) {
         throwIfAborted(streaming.controller.signal);
         const latestMessages = chat.getConversationMessages(conversationId);
-        return requestReply({
+        throw new ChatReplyContinuation({
           ui,
           chat,
           executeToolActions,
@@ -572,10 +601,11 @@ export async function requestReply({
           refreshRequestSnapshot,
           loadSemanticRecallConversations,
           preferredOpenAiToolHistoryMode,
-          toolFollowupDepth,
-          lengthFollowupDepth,
-          toolPreparationRetryDepth: toolPreparationRetryDepth + 1,
-          taskActivationEnforcement: nextTaskActivationEnforcement
+          continuation: {
+            ...continuation,
+            preparationRetryDepth: preparationRetryDepth + 1,
+            taskActivationEnforcement: nextTaskActivationEnforcement
+          }
         });
       }
 
@@ -585,7 +615,7 @@ export async function requestReply({
         conversationId,
         collaboratorId,
         assistantName,
-        messages: replyBaselineMessages,
+        messages,
         visibleReply: visibleContent,
         reply,
         preparationOutcome: toolOutcome,
@@ -598,7 +628,7 @@ export async function requestReply({
         collaboratorId,
         assistantName,
         assistantMessageId: placeholderId,
-        messages: replyBaselineMessages,
+        messages,
         audit: requestAudit,
         visibleReply: visibleContent,
         reply,
@@ -646,7 +676,7 @@ export async function requestReply({
         conversationId,
         collaboratorId,
         assistantName,
-        messages: replyBaselineMessages,
+        messages,
         visibleReply: visibleContent,
         reply,
         preparationOutcome: toolOutcome,
@@ -660,7 +690,7 @@ export async function requestReply({
         collaboratorId,
         assistantName,
         assistantMessageId: placeholderId,
-        messages: replyBaselineMessages,
+        messages,
         audit: requestAudit,
         visibleReply: visibleContent,
         reply,
@@ -685,7 +715,7 @@ export async function requestReply({
       if (activatedTaskThisTurn && taskAfterToolSettlement && !isConversationTaskTerminal(taskAfterToolSettlement.status)) {
         throwIfAborted(streaming.controller.signal);
         const latestMessages = chat.getConversationMessages(conversationId);
-        return requestReply({
+        throw new ChatReplyContinuation({
           ui,
           chat,
           executeToolActions,
@@ -698,22 +728,22 @@ export async function requestReply({
           refreshRequestSnapshot,
           loadSemanticRecallConversations,
           preferredOpenAiToolHistoryMode,
-          toolFollowupDepth,
-          lengthFollowupDepth,
-          toolPreparationRetryDepth,
-          taskActivationEnforcement: nextTaskActivationEnforcement
+          continuation: {
+            ...continuation,
+            taskActivationEnforcement: nextTaskActivationEnforcement
+          }
         });
       }
 
       const followupPlan = resolveToolFollowupPlan({
         outcomes,
-        depth: toolFollowupDepth,
+        seenExchangeFingerprints: seenToolExchangeFingerprints,
         assistantToolOnlyTurn: isToolOnlyTurn
       });
       if (followupPlan) {
         throwIfAborted(streaming.controller.signal);
         const latestMessages = chat.getConversationMessages(conversationId);
-        return requestReply({
+        throw new ChatReplyContinuation({
           ui,
           chat,
           executeToolActions,
@@ -721,14 +751,19 @@ export async function requestReply({
           writableConversation,
           collaboratorId,
           messages: latestMessages,
-          requestMessages: [...latestMessages, followupPlan.message],
+          requestMessages: latestMessages,
           requestSnapshot: refreshRequestSnapshot?.() ?? activeRequestSnapshot,
           refreshRequestSnapshot,
           loadSemanticRecallConversations,
           preferredOpenAiToolHistoryMode,
-          toolFollowupDepth: toolFollowupDepth + 1,
-          lengthFollowupDepth,
-          toolPreparationRetryDepth
+          continuation: {
+            ...continuation,
+            toolExchangeDepth: toolExchangeDepth + 1,
+            seenToolExchangeFingerprints: [
+              ...seenToolExchangeFingerprints,
+              followupPlan.exchangeFingerprint
+            ]
+          }
         });
       }
     } else {
@@ -738,7 +773,7 @@ export async function requestReply({
         conversationId,
         collaboratorId,
         assistantName,
-        messages: replyBaselineMessages,
+        messages,
         visibleReply: visibleContent,
         reply,
         preparationOutcome: toolOutcome,
@@ -751,7 +786,7 @@ export async function requestReply({
         collaboratorId,
         assistantName,
         assistantMessageId: placeholderId,
-        messages: replyBaselineMessages,
+        messages,
         audit: requestAudit,
         visibleReply: visibleContent,
         reply,
@@ -763,7 +798,7 @@ export async function requestReply({
       if (activatedTaskThisTurn && latestTaskState && !isConversationTaskTerminal(latestTaskState.status)) {
         throwIfAborted(streaming.controller.signal);
         const latestMessages = chat.getConversationMessages(conversationId);
-        return requestReply({
+        throw new ChatReplyContinuation({
           ui,
           chat,
           executeToolActions,
@@ -776,10 +811,10 @@ export async function requestReply({
           refreshRequestSnapshot,
           loadSemanticRecallConversations,
           preferredOpenAiToolHistoryMode,
-          toolFollowupDepth,
-          lengthFollowupDepth,
-          toolPreparationRetryDepth,
-          taskActivationEnforcement: nextTaskActivationEnforcement
+          continuation: {
+            ...continuation,
+            taskActivationEnforcement: nextTaskActivationEnforcement
+          }
         });
       }
     }
@@ -789,11 +824,11 @@ export async function requestReply({
     // much as a truncated plain-text reply.
     if (shouldRequestLengthFollowup({
       reply,
-      depth: lengthFollowupDepth
+      depth: lengthRecoveryDepth
     })) {
       throwIfAborted(streaming.controller.signal);
       const latestMessages = chat.getConversationMessages(conversationId);
-      return requestReply({
+      throw new ChatReplyContinuation({
         ui,
         chat,
         executeToolActions,
@@ -805,9 +840,10 @@ export async function requestReply({
         requestSnapshot: refreshRequestSnapshot?.() ?? activeRequestSnapshot,
         refreshRequestSnapshot,
         loadSemanticRecallConversations,
-        toolFollowupDepth,
-        lengthFollowupDepth: lengthFollowupDepth + 1,
-        toolPreparationRetryDepth
+        continuation: {
+          ...continuation,
+          lengthRecoveryDepth: lengthRecoveryDepth + 1
+        }
       });
     }
 
@@ -827,22 +863,28 @@ export async function requestReply({
     finishChatSendPerformanceTrace(conversationId, 'completed');
     return { status: 'completed' };
   } catch (error) {
+    if (error instanceof ChatReplyContinuation) {
+      throw error;
+    }
     streaming.commitQueuedProgress();
+    if (error instanceof ChatReplyPersistenceError) {
+      throw error;
+    }
     console.error('[requestReply] catch block hit', {
       error,
       errorMessage: error instanceof Error ? error.message : String(error),
       errorStack: error instanceof Error ? error.stack : undefined,
       conversationId,
       placeholderId,
-      toolFollowupDepth,
-      lengthFollowupDepth
+      toolExchangeDepth,
+      lengthRecoveryDepth
     });
 
     if (isAbortError(error)) {
       const latestPlaceholder = chat.findConversationMessage(conversationId, placeholderId);
 
       if (!latestPlaceholder?.content.trim() && !latestPlaceholder?.thinkingText?.trim()) {
-        chat.replaceConversationMessages(writableConversation, replyBaselineMessages);
+        chat.replaceConversationMessages(writableConversation, messages);
       } else {
         streaming.scheduleLifecycleRelease(220);
         preserveStreamingLifecycle = true;
@@ -853,7 +895,7 @@ export async function requestReply({
         conversationId,
         collaboratorId,
         assistantName,
-        messages: replyBaselineMessages,
+        messages,
         visibleReply: latestPlaceholder?.content ?? '',
         reply: {
           content: latestPlaceholder?.content ?? '',
@@ -868,7 +910,7 @@ export async function requestReply({
         collaboratorId,
         assistantName,
         assistantMessageId: placeholderId,
-        messages: replyBaselineMessages,
+        messages,
         audit: requestAudit,
         visibleReply: latestPlaceholder?.content ?? '',
         reply: {
@@ -946,14 +988,14 @@ export async function requestReply({
       const recoveryFollowupPlan = recoveredInterruptedWorkspaceDraft
         ? resolveToolFollowupPlan({
             outcomes: recoveryOutcomes,
-            depth: toolFollowupDepth,
+            seenExchangeFingerprints: seenToolExchangeFingerprints,
             assistantToolOnlyTurn: false
           })
         : null;
       if (recoveryFollowupPlan) {
         throwIfAborted(streaming.controller.signal);
         const latestMessages = chat.getConversationMessages(conversationId);
-        return requestReply({
+        throw new ChatReplyContinuation({
           ui,
           chat,
           executeToolActions,
@@ -961,13 +1003,18 @@ export async function requestReply({
           writableConversation,
           collaboratorId,
           messages: latestMessages,
-          requestMessages: [...latestMessages, recoveryFollowupPlan.message],
+          requestMessages: latestMessages,
           requestSnapshot: refreshRequestSnapshot?.() ?? activeRequestSnapshot,
           refreshRequestSnapshot,
           loadSemanticRecallConversations,
-          toolFollowupDepth: toolFollowupDepth + 1,
-          lengthFollowupDepth,
-          toolPreparationRetryDepth
+          continuation: {
+            ...continuation,
+            toolExchangeDepth: toolExchangeDepth + 1,
+            seenToolExchangeFingerprints: [
+              ...seenToolExchangeFingerprints,
+              recoveryFollowupPlan.exchangeFingerprint
+            ]
+          }
         });
       }
       streaming.scheduleLifecycleRelease(320);
@@ -987,7 +1034,7 @@ export async function requestReply({
       conversationId,
       collaboratorId,
       assistantName,
-      messages: replyBaselineMessages,
+      messages,
       visibleReply: failureMessage
     });
     recordModelFlowTrace({
@@ -997,7 +1044,7 @@ export async function requestReply({
       collaboratorId,
       assistantName,
       assistantMessageId: placeholderId,
-      messages: replyBaselineMessages,
+      messages,
       audit: requestAudit,
       visibleReply: failureMessage,
       toolLedger: chat.findConversation(conversationId)?.toolLedger
@@ -1014,6 +1061,25 @@ export async function requestReply({
     });
     return { status: 'failed' };
   } finally {
-    streaming.finish(preserveStreamingLifecycle);
+    try {
+      await persistChatReplyBoundary(chat.persistToDb, 'after-reply');
+      recordChatSendPerformanceMark(conversationId, '聊天发送 · 回复结果已安全落盘');
+    } finally {
+      streaming.finish(preserveStreamingLifecycle);
+    }
+  }
+}
+
+export async function requestReply(args: RequestReplyArgs): Promise<ChatReplyRunResult> {
+  let nextArgs = args;
+  while (true) {
+    try {
+      return await requestReplyRound(nextArgs);
+    } catch (error) {
+      if (!(error instanceof ChatReplyContinuation)) {
+        throw error;
+      }
+      nextArgs = error.next;
+    }
   }
 }

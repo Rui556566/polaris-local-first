@@ -1,6 +1,7 @@
 import type { ToolInvocation, ToolInvocationKind } from '../../types/domain';
 import { findPolarisToolManifestEntry } from '../tool-protocol/toolRegistry';
 import type { PolarisToolResultReplayMode } from '../tool-protocol/toolRegistryShared';
+import { buildToolResultEvidence } from '../toolResultEvidence';
 
 const DETAIL_EXCERPT_CHARS = 1_800;
 const ERROR_EXCERPT_CHARS = 1_200;
@@ -42,6 +43,46 @@ function assignIfPresent(target: Record<string, unknown>, key: string, value: un
   if (typeof value === 'string' && !value.trim()) return;
   if (Array.isArray(value) && value.length === 0) return;
   target[key] = value;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : undefined;
+}
+
+// 证据对象与 detailText 承载同一份内容；发给模型的投影只保留 detailText 一份，
+// 证据侧压缩到标识/计数字段，避免同一段正文在 tool_result 里出现两遍。
+function slimMcpResultForRequest(value: unknown) {
+  const record = asRecord(value);
+  if (!record) return undefined;
+  const slim: Record<string, unknown> = {};
+  assignIfPresent(slim, 'serverId', record.serverId);
+  assignIfPresent(slim, 'serverName', record.serverName);
+  assignIfPresent(slim, 'toolName', record.toolName);
+  assignIfPresent(slim, 'schemaName', record.schemaName);
+  if (record.isError !== undefined) slim.isError = record.isError;
+  return Object.keys(slim).length ? slim : undefined;
+}
+
+function slimProjectFileReadsForRequest(value: unknown) {
+  if (!Array.isArray(value)) return undefined;
+  const slimmed = value
+    .map((entry) => {
+      const record = asRecord(entry);
+      if (!record) return undefined;
+      if (record.kind === 'search') {
+        const { matches: _matches, ...rest } = record;
+        return rest;
+      }
+      if (record.kind === 'directory') {
+        const { files: _files, ...rest } = record;
+        return rest;
+      }
+      return record;
+    })
+    .filter((entry): entry is Record<string, unknown> => Boolean(entry));
+  return slimmed.length ? slimmed : undefined;
 }
 
 function projectDetailFields(args: {
@@ -104,7 +145,7 @@ export function projectToolResultPayloadForRequest(
   assignIfPresent(projected, 'projectFileIds', payload.projectFileIds);
   assignIfPresent(projected, 'projectFilePaths', payload.projectFilePaths);
   assignIfPresent(projected, 'projectFiles', payload.projectFiles);
-  assignIfPresent(projected, 'projectFileReads', payload.projectFileReads);
+  assignIfPresent(projected, 'projectFileReads', slimProjectFileReadsForRequest(payload.projectFileReads));
   assignIfPresent(projected, 'projectFileEffects', payload.projectFileEffects);
   assignIfPresent(projected, 'workspaceReferenceDocId', payload.workspaceReferenceDocId);
   assignIfPresent(projected, 'workspaceReferenceDocTitle', payload.workspaceReferenceDocTitle);
@@ -117,9 +158,7 @@ export function projectToolResultPayloadForRequest(
   assignIfPresent(projected, 'memoryDocId', payload.memoryDocId);
   assignIfPresent(projected, 'memoryDocTitle', payload.memoryDocTitle);
   assignIfPresent(projected, 'memoryDocCreated', payload.memoryDocCreated);
-  assignIfPresent(projected, 'webSearch', payload.webSearch);
-  assignIfPresent(projected, 'webPageRead', payload.webPageRead);
-  assignIfPresent(projected, 'mcpResult', payload.mcpResult);
+  assignIfPresent(projected, 'mcpResult', slimMcpResultForRequest(payload.mcpResult));
   assignIfPresent(projected, 'targetLabel', payload.targetLabel);
 
   projectDetailFields({
@@ -133,39 +172,5 @@ export function projectToolResultPayloadForRequest(
 }
 
 export function projectToolInvocationForRequest(toolInvocation: ToolInvocation) {
-  return projectToolResultPayloadForRequest({
-    kind: toolInvocation.kind,
-    status: toolInvocation.status,
-    title: toolInvocation.title,
-    summary: toolInvocation.summary,
-    detailText: toolInvocation.detailText,
-    scope: toolInvocation.themeScope,
-    surfaces: toolInvocation.themeSurfaceLabels,
-    intent: toolInvocation.themeIntentLabel,
-    previewId: toolInvocation.previewId,
-    presetId: toolInvocation.presetId,
-    world: toolInvocation.world,
-    cardId: toolInvocation.cardId,
-    projectFileId: toolInvocation.projectFileId,
-    projectFileIds: toolInvocation.projectFileIds,
-    projectFilePaths: toolInvocation.projectFilePaths,
-    projectFiles: toolInvocation.projectFiles,
-    projectFileReads: toolInvocation.projectFileReads,
-    projectFileEffects: toolInvocation.projectFileEffects,
-    workspaceReferenceDocId: toolInvocation.workspaceReferenceDocId,
-    workspaceReferenceDocTitle: toolInvocation.workspaceReferenceDocTitle,
-    workspaceReferenceDocs: toolInvocation.workspaceReferenceDocs,
-    workspaceReferenceDocReads: toolInvocation.workspaceReferenceDocReads,
-    readableContextCandidates: toolInvocation.readableContextCandidates,
-    projectDiagnostics: toolInvocation.projectDiagnostics,
-    imageCardId: toolInvocation.imageCardId,
-    memoryItems: toolInvocation.memoryItems,
-    memoryDocId: toolInvocation.memoryDocId,
-    memoryDocTitle: toolInvocation.memoryDocTitle,
-    webSearch: toolInvocation.webSearch,
-    webPageRead: toolInvocation.webPageRead,
-    mcpResult: toolInvocation.mcpResult,
-    targetLabel: toolInvocation.targetLabel,
-    error: toolInvocation.error
-  });
+  return projectToolResultPayloadForRequest(buildToolResultEvidence(toolInvocation));
 }

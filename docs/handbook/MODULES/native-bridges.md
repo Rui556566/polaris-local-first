@@ -6,7 +6,7 @@ product behavior that belongs in shared `src/` code.
 ## Purpose
 
 Provide real device or shell capabilities: SQLite, file selection, personal-data access helpers,
-import rollback files, notifications, photo album integration, WebDAV backup support, and native
+backup files, notifications, photo album integration, WebDAV backup support, and native
 wrapper configuration.
 
 ## Boundaries
@@ -15,7 +15,7 @@ Native bridges own:
 
 - Platform APIs and permission-facing adapters.
 - Native SQLite capability exposure.
-- System file and rollback file handling.
+- System file and user-selected backup file handling.
 - Wrapper-specific build/config files under `ios/` and `android/`.
 
 Native bridges do not own:
@@ -40,10 +40,14 @@ Important shared adapters:
 src/native/localDataSqlite.ts
 src/native/systemPickedFiles.ts
 src/native/systemBackupFiles.ts
-src/native/importRollbackFile.ts
 src/native/localTriggerNotifications.ts
 src/native/personalData.ts
 ```
+
+The personal-data bridge exposes EventKit calendar facts without guessing account ownership.
+`listCalendars` returns writable calendars with stable identifiers, source metadata, and the system
+default flag. `createCalendarEvent` accepts an optional `calendarId`; when it is absent, the bridge
+uses the default calendar selected in iOS settings.
 
 ## Data Flow
 
@@ -76,7 +80,7 @@ the returned shape structured and product-neutral so shared code can decide prod
 
 ```bash
 npm run typecheck
-npm test -- src/native/localDataSqliteNativeParity.test.ts src/native/importRollbackFile.test.ts
+npm test -- src/native/localDataSqliteNativeParity.test.ts src/infrastructure/nativePersistenceBackend.test.ts
 npm test
 npm run build
 ```

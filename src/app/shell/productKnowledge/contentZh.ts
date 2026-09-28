@@ -67,9 +67,9 @@ export const PRODUCT_DOCS: ProductDoc[] = [
       {
         heading: '模型和请求入口',
         body: [
-          'Polaris 不把某一家模型当成唯一核心。你可以配置 OpenAI、Anthropic、Gemini 或 OpenAI 兼容接口，也可以走自建中转。网页端为了跨域稳定，完整 https 入口可能经当前配置的 relay 转发；原生端会优先直连，必要时再切回配置的 relay。',
+          'Polaris 不把某一家模型当成唯一核心。你可以配置 OpenAI、Anthropic、Gemini 或 OpenAI 兼容接口，也可以走自建中转。网页端和原生端都会先请求你填写的真实入口；只有直连没有拿到任何响应时，才会尝试当前部署提供的 relay。',
           'API Key 和模型供应商配置由你自己填写和管理。调用外部模型时，请求内容会发送给你选择的供应商或中转入口；不同供应商的保存、审核和日志策略由它们自己的服务条款决定。',
-          '聊天模型、跨对话总结模型、向量检索模型、生图模型和语音朗读模型可以分开设置。生图在设置的生图页里选择供应商、模型和尺寸，适合接 OpenAI 兼容的图片生成接口；语音朗读在单独的语音页里直接填写 Base URL、API Key、接口路径、模型、音色和格式，不从语言模型供应商列表拉取，当前支持 OpenAI 兼容 audio/speech、MiniMax T2A 与 ElevenLabs TTS。'
+          '聊天模型、跨对话总结模型、向量检索模型、生图模型和语音朗读模型可以分开设置。生图在单独的生图页配置，支持 OpenAI 兼容图片接口、MiniMax 生图和阶跃星辰图像生成；语音朗读在单独的语音页里填写 Base URL、API Key、接口路径、模型、音色和格式，不从语言模型供应商列表拉取，当前支持 OpenAI 兼容 audio/speech、MiniMax T2A、ElevenLabs TTS 与 FishAudio。'
         ]
       },
       {
@@ -165,7 +165,7 @@ export const PRODUCT_DOCS: ProductDoc[] = [
         body: [
           'Polaris 先把当前对话、协作者、工具上下文、工作区上下文、附件摘要、任务状态和运行配置整理成一次请求快照，再按当前供应商的协议生成真正发给外部模型的 HTTP 请求。供应商可以是内置线路、OpenAI 兼容接口、Anthropic Messages、OpenAI Responses、Gemini Generate Content，或用户自建中转。',
           '供应商配置里最关键的是 base URL、path、protocol、model 和 API Key。protocol 决定请求体形状、鉴权头、图片格式、工具调用格式、reasoning/thinking 参数、输出 token 字段和缓存写法。model 名不只是显示文字；很多兼容平台会根据 model 选择能力或路由，填错会导致 404、400、无工具调用、无流式输出或上下文预算异常。',
-          '请求入口分平台。base URL 写成相对路径时，通常走当前部署的内置接口；写成完整 https 入口时，网页端可能需要经当前配置的 relay 转发来避开浏览器跨域预检，原生端则优先直连以保留流式输出，网络失败或平台限制时才考虑 relay。不要把 relay 理解成“服务器保存对话”，它主要是请求转发层。'
+          '请求入口分平台。base URL 写成相对路径时，通常走当前部署的内置接口；写成完整 https 入口时，网页端和原生端先直连真实入口，只有网络或跨域限制让请求完全拿不到响应时才考虑当前部署的 relay。不要把 relay 理解成“服务器保存对话”，它主要是请求转发层。'
         ],
         bullets: [
           '模型不可用通常和供应商选择、model 真实性、protocol 匹配、base URL/path、Key 权限有关。',
@@ -184,7 +184,7 @@ export const PRODUCT_DOCS: ProductDoc[] = [
           '回复截断相关字段包括 output token 字段、供应商上限、模型自身限制和请求预算。',
           '图片输入相关条件包括协议图片能力、图片序列化格式和附件是否进入请求上下文。',
           'thinking/reasoning 相关条件包括模型能力、预算发送方式和供应商特殊字段要求。',
-          '缓存相关条件包括供应商 prompt caching 能力，以及当前协议是否需要显式 cache-control。'
+          '缓存相关条件包括供应商 prompt caching 能力，以及当前协议是否需要显式 cache-control。Anthropic Messages 请求会发送顶层 cache_control 让多轮历史自动进入短期缓存，同时给稳定 system / tool 前缀打显式断点。'
         ]
       },
       {
@@ -230,7 +230,7 @@ export const PRODUCT_DOCS: ProductDoc[] = [
           'attachment 工具只有当前对话存在可用附件时出现；archive 工具还要求有 zip 类附件。',
           'memory 读取和 memoryWrite 写入是两类开关；能读长期资料不代表能写长期记忆。',
           'proactive 主动消息工具只在用户打开主动消息工具组后可见；它只管理当前协作者的规则，不跨协作者替别人查看、修改或取消。',
-          'web、generation、MCP 都是用户显式允许后才给模型看的能力。generation 暴露二维码和生图工具；生图的 provider/model/size 属于设置里的生图页，语音朗读的 apiType/baseUrl/apiKey/path/model/voice/format 属于设置里的语音页，二者都不属于工具可见性本身。',
+          'web、generation、MCP 都是用户显式允许后才给模型看的能力。generation 暴露二维码和生图工具；runCode 归在卡片工具组，因为它是处理计算、文本和卡片产物的 JS 沙箱。生图的 provider/model/size 属于设置里的生图页，语音朗读的 apiType/baseUrl/apiKey/path/model/voice/format 属于设置里的语音页，二者都不属于工具可见性本身。',
           'knowledge 工具读取 Polaris 内置产品知识文档，适合在回答 Polaris 自身怎么用、对象边界、工具箱、工作区、供应商、备份和隐私问题前先确认事实。'
         ]
       },
@@ -481,7 +481,7 @@ boot();
         body: [
           '完整备份包含 Polaris 的本地状态。跨设备迁移时，最稳妥的路径是：旧设备导出备份，新设备导入备份；App 版可以通过系统文件选择器导出或导入，也可以用 WebDAV 做跨设备中转。导入会覆盖当前本地数据，所以导入前建议先导出当前设备备份。',
           '结构化备份包是可见 store 状态和资产索引的快照，不是底层 LocalData repository 的原始转储。它通常包含 space、chat、collection、persona、persona memory doc content、runtime 和 assets index。排查导入问题时，先判断包是 Polaris 结构化导出还是 Kelivo zip，不要只靠文件名猜。',
-          '导入大致包含读取备份包、解压、读取资产、写入当前持久化后端和恢复状态。浏览器版通常写入 IndexedDB/localStorage；原生 App 会通过系统文件选择器读取 zip 备份，并写入本地持久化层。结构化备份导入会先完整解析备份包，解析成功后替换当前 KV、localStorage、资产并重建 LocalData。任何一层卡住都会让 UI 看起来像“导入中”。Android WebView 对大文件、zip 解压、并发资产读取和 IndexedDB transaction 比桌面 Chrome 更敏感，所以同一个包在桌面可用不代表手机一定不卡。',
+          '导入会先完整解析并校验备份包，再 staging 附件，并让 chat、collection、persona、runtime、space、document、asset 各域在当前 LocalData backend 上原子替换；包中缺席的旧行在同一事务里写 tombstone。失败域保留原数据，成功域会明确列出，不会静默半成功。Android WebView 对大文件、zip 解压、附件读取和 IndexedDB transaction 比桌面 Chrome 更敏感，所以同一个包在桌面可用不代表手机一定不卡。',
           '导入卡住相关条件包括 App 版本、备份包体积、图片或附件数量、锁屏或切后台、重复导入、WebDAV 路径、浏览器路径和当前持久化后端写入状态。当前 iOS review build 不再自动迁移旧 IndexedDB 设备状态；旧数据需要通过完整备份导入恢复。向量索引行不是备份可信源，导入后需要重建。导入失败后的主要风险是备份包丢失或当前状态被反复覆盖。'
         ],
         bullets: [
@@ -560,7 +560,7 @@ boot();
       {
         heading: '备份里有什么',
         body: [
-          '完整备份用于保存 Polaris 的本地状态，通常包括对话、房间、卡片、项目文件、协作者、部分设置、工具偏好和可迁移的本地资源索引。它的目的不是导出一段聊天文本，而是把当前设备上的 Polaris 搬到另一个位置继续用。',
+          '完整备份用于保存 Polaris 的本地状态，通常包括对话、房间、卡片、项目文件、协作者、部分设置、工具偏好和可迁移的本地资源索引。导出会严格读取当前事实；发现不完整正文或记录时会报错，不会生成看似成功的残缺包。',
           '当前结构化备份包是可见 store 状态和资产索引的快照，不是底层 LocalData repository 的原始转储。排查导入问题时，先判断包是 Polaris 结构化导出还是 Kelivo zip，不要只靠文件名猜。',
           '导入入口也能识别 Kelivo zip 备份包。Kelivo 迁移会把对话、协作者、头像、背景、聊天附件、短记忆、模型供应商、API Key 和可兼容的 HTTP/SSE MCP 服务转换成 Polaris 本地状态；不兼容或没有 Polaris 对应语义的设置会跳过，而不是伪装成已迁移。',
           '备份包可能包含私密内容。不要把完整备份包发给不可信的人或模型。排查问题时，优先发截图、错误摘要和非敏感统计。'
@@ -569,8 +569,8 @@ boot();
       {
         heading: '恢复会发生什么',
         body: [
-          '恢复备份会以备份内容覆盖当前本地数据。导入前如果当前设备里已经有重要内容，先导出一份当前备份。这样即使导入错包，也能回到导入前状态。',
-          '恢复会写入当前运行环境使用的持久化后端：浏览器版通常是 IndexedDB/localStorage，原生 App 使用本地持久化层。导入会直接覆盖当前本地数据；它不是实时同步，也不是把两台设备合并。导入过程中不要退出 App、锁屏、清理后台或重复点导入。大备份包在 Android WebView 里可能需要更久，尤其是图片资产很多时。',
+          '恢复备份会先完整检查包结构、正文和资产，再按数据域替换当前事实。每个域在当前后端里原子提交；失败域保留旧数据，成功域可以独立完成，结果会明确显示完整成功或部分成功。导入前仍建议先导出当前备份。',
+          '浏览器版写入 IndexedDB LocalData 和 localStorage，原生 App 写入 SQLite LocalData 和本地 blob。导入不会先清空整库或全部资产；附件按 id 安全写入，localStorage 写入失败会恢复原值。它不是实时同步，也不是把两台设备合并。',
           '如果导入卡住或导入后像混了旧状态，不要把“再导一次”当成正常解决方案。先保住当前备份，再看 App 版本、包类型、导入路径、本地体检和持久化后端状态。',
           '向量索引不是备份里的可信源数据。恢复完成后，如果你开启了跨对话向量检索，索引会按当前配置重新进入需要重建状态；重建后才能用于召回。'
         ]

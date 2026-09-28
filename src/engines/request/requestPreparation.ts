@@ -640,6 +640,7 @@ export async function prepareCollaboratorReplyRequest(params: {
     personaPromptSource: personaPrompt.source,
     templateContext,
     regexTriggers: preparedAdvanced?.regexTriggers,
+    includeRuntimeClockContext: persona?.systemTimeContextEnabled === true,
     promptInjections: providerCapability.promptInjections,
     toolContext,
     currentTask,
@@ -752,6 +753,8 @@ export async function prepareCollaboratorReplyRequest(params: {
   const cachePlan = resolveRequestCachePlan({
     promptParts: selectedPromptParts,
     providerCacheMode: providerCapabilities.cache.mode,
+    providerSendsTopLevelCacheControl: providerCapability.cache.sendsTopLevelCacheControl,
+    providerAutomaticMessageHistoryCache: providerCapability.cache.automaticMessageHistoryCache,
     modelId
   });
   const cachePlanMs = runtimeNow() - stepStartedAt;

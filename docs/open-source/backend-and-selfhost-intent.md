@@ -10,7 +10,7 @@ Same-origin means the deployment/runtime actually serves both the frontend and A
 
 The backend can provide:
 
-- provider relay for browser CORS or native transport cases
+- provider relay fallback when browser or native direct transport receives no response
 - built-in chat route for selected upstream providers
 - embeddings relay
 - image relay
@@ -51,7 +51,6 @@ Do not loosen CORS to `*` on routes that forward credentials or receive diagnost
 The current repository references some backend capabilities that are not fully implemented as public handlers yet:
 
 - `/api/provider-models`
-- `/api/provider-audio`
 - `/api/material-shares`
 - `/shared-materials/...`
 

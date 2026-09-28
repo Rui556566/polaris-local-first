@@ -1,10 +1,7 @@
-import type { PersonaAdvancedSettings, ProviderCapabilities, ProviderProfile, ProviderProtocol } from '../../types/domain';
+import type { PersonaAdvancedSettings, ProviderProfile, ProviderProtocol } from '../../types/domain';
 import type { ProviderCompatibilityMode, ProviderRouteLabelKey } from './internal/providerProfile';
 import { isPolarisBuiltInProvider } from '../freeProvider';
-import {
-  resolveProviderEffectiveCapabilities,
-  resolveProviderEffectiveModel
-} from './internal/providerEffectiveProfile';
+import { resolveProviderEffectiveModel } from './internal/providerEffectiveProfile';
 import {
   isClaudeModel,
   isDeepSeekHost,
@@ -14,6 +11,7 @@ import {
   isKimiK2Model,
   isMoonshotHost,
   isN1nHost,
+  isOpenRouterAnthropicClaudeModel,
   isOpenRouterHost,
   isSiliconFlowHost,
   parseProviderHost
@@ -142,11 +140,13 @@ export type ProviderCapability = {
   cache: {
     mode: CanonicalProviderCacheMode;
     promptCaching: boolean;
+    openAiCompatibleCacheControl: boolean;
+    sendsTopLevelCacheControl: boolean;
+    automaticMessageHistoryCache: boolean;
   };
   transport: {
     modes: CanonicalProviderTransportMode[];
     relayAllowedWhenNetworkFails: boolean;
-    nativeIosRelayPreferred: boolean;
   };
   execution: {
     maxAttempts: 1 | 2;
@@ -185,13 +185,6 @@ function parsePositiveInteger(value: string | undefined) {
   return parsed;
 }
 
-function resolveEffectiveCapabilities(
-  provider: ProviderProfile,
-  model: string
-): ProviderCapabilities {
-  return resolveProviderEffectiveCapabilities(provider, model);
-}
-
 function resolveRuntimeProvider(
   provider: ProviderProfile,
   advanced?: ProviderCapabilityAdvanced
@@ -199,8 +192,7 @@ function resolveRuntimeProvider(
   const model = resolveProviderEffectiveModel(provider, advanced?.modelOverride);
   return {
     ...provider,
-    model,
-    capabilities: resolveEffectiveCapabilities(provider, model)
+    model
   };
 }
 
@@ -209,9 +201,8 @@ function resolveTransportModes(provider: ProviderProfile): CanonicalProviderTran
   if (usesBuiltInGatewayTransport(provider)) {
     modes.push('built-in-gateway');
   } else {
-    modes.push('direct');
+    modes.push('direct', 'browser-relay', 'native-direct');
   }
-  modes.push('browser-relay', 'native-relay');
   return modes;
 }
 
@@ -314,6 +305,18 @@ function isKimiRetryRoute(provider: ProviderProfile) {
   return (isSiliconFlowHost(host) || isGatewayBaseUrl(provider.baseUrl)) && isKimiK2Model(provider.model);
 }
 
+function isOpenRouterAnthropicClaudeCacheRoute(
+  provider: ProviderProfile,
+  protocol: ProviderProtocol,
+  host: string
+) {
+  return (
+    protocol === 'openai-completions'
+    && isOpenRouterHost(host)
+    && isOpenRouterAnthropicClaudeModel(provider.model)
+  );
+}
+
 function resolveStreamIdleTimeoutMs(
   provider: ProviderProfile,
   protocol: ProviderProtocol,
@@ -370,13 +373,8 @@ function resolveGeminiThoughtSignatureTransport(
 
 function resolveImageInputMode(args: {
   provider: ProviderProfile;
-  host: string;
   protocolShape: { imageInput: CanonicalProviderImageInputMode };
 }) {
-  if (isDeepSeekHost(args.host)) {
-    return 'none';
-  }
-
   return args.provider.capabilities.images ? args.protocolShape.imageInput : 'none';
 }
 
@@ -439,11 +437,17 @@ export function resolveProviderCapability(
     reasoningTransport,
     sendThinkingBudget: profile.sendThinkingBudget
   });
+  const openAiCompatibleCacheControl = isOpenRouterAnthropicClaudeCacheRoute(runtimeProvider, protocol, host);
+  const cacheMode: CanonicalProviderCacheMode = openAiCompatibleCacheControl
+    ? 'explicit-cache-control'
+    : protocolShape.cacheMode;
+  // OpenRouter forwards per-block controls, but top-level automatic cache control
+  // is only valid for direct Anthropic handling and can reject routed requests.
+  const sendsTopLevelCacheControl = cacheMode === 'explicit-cache-control' && !openAiCompatibleCacheControl;
   const toolChoiceControl = resolveToolChoiceControl(profile);
   const streamingEnabled = runtimeProvider.capabilities.streaming && advanced?.streaming !== false;
   const inputImages = resolveImageInputMode({
     provider: runtimeProvider,
-    host,
     protocolShape
   });
   const reasoningMode = runtimeProvider.capabilities.thinking ? protocolShape.reasoningMode : 'none';
@@ -510,13 +514,15 @@ export function resolveProviderCapability(
       outputTokenField: protocolShape.outputTokenField
     },
     cache: {
-      mode: protocolShape.cacheMode,
-      promptCaching: protocolShape.cacheMode !== 'none'
+      mode: cacheMode,
+      promptCaching: cacheMode !== 'none',
+      openAiCompatibleCacheControl,
+      sendsTopLevelCacheControl,
+      automaticMessageHistoryCache: sendsTopLevelCacheControl
     },
     transport: {
       modes: resolveTransportModes(runtimeProvider),
-      relayAllowedWhenNetworkFails: !usesBuiltInGatewayTransport(runtimeProvider),
-      nativeIosRelayPreferred: !usesBuiltInGatewayTransport(runtimeProvider)
+      relayAllowedWhenNetworkFails: !usesBuiltInGatewayTransport(runtimeProvider)
     },
     execution: {
       maxAttempts: isKimiRetryRoute(runtimeProvider) ? 2 : 1,
@@ -529,7 +535,7 @@ export function resolveProviderCapability(
     },
     context: {
       collapseSystemMessages: profile.collapseSystemMessages,
-      deferVolatileSystemMessages: protocolShape.cacheMode === 'automatic-or-unknown',
+      deferVolatileSystemMessages: protocolShape.cacheMode === 'automatic-or-unknown' || openAiCompatibleCacheControl,
       omitVolatileSystemMessages: isDeepSeekHost(host)
     },
     promptInjections: isMimoDirectExecutionSensitiveModel(runtimeProvider.model)

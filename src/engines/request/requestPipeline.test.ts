@@ -13,16 +13,16 @@ vi.mock('../chatApi', () => ({
   requestAssistantReply: requestAssistantReplyMock
 }));
 
-const directMimoTextProvider: ProviderProfile = {
-  id: 'custom-mimo',
-  name: 'Xiaomi MiMo',
+const textProvider: ProviderProfile = {
+  id: 'custom-text',
+  name: 'Text Provider',
   protocol: 'openai-completions',
   baseUrl: 'https://api.xiaomimimo.com/v1',
   path: '/chat/completions',
   apiKey: 'sk-test',
-  model: 'mimo-v2-pro',
+  model: 'text-model',
   capabilities: {
-    images: true,
+    images: false,
     streaming: true,
     thinking: false
   }
@@ -70,7 +70,7 @@ describe('requestPipeline', () => {
 
   it('blocks image turns before sending when the effective model is text-only and OCR is unavailable', async () => {
     await expect(requestCollaboratorReply({
-      api: directMimoTextProvider,
+      api: textProvider,
       persona: null,
       messages: [imageMessage]
     })).rejects.toThrow('当前模型没有直接图片能力');
@@ -84,12 +84,16 @@ describe('requestPipeline', () => {
       api: visionProvider,
       imageUnderstanding: { enabled: false },
       persona: null,
+      activeConversationId: 'conversation-vision-1',
       messages: [imageMessage]
     });
 
     expect(reply.content).toBe('主模型直接看到了图片');
     expect(getAssetBlob).toHaveBeenCalledWith('asset-1');
     expect(requestAssistantReplyMock).toHaveBeenCalledTimes(1);
+    expect(requestAssistantReplyMock).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: 'conversation-vision-1'
+    }));
     const mainRequestContext = requestAssistantReplyMock.mock.calls[0]?.[0]?.context;
     expect(JSON.stringify(mainRequestContext)).toContain('data:image/png;base64,');
   });
@@ -106,11 +110,32 @@ describe('requestPipeline', () => {
     expect(requestAssistantReplyMock).not.toHaveBeenCalled();
   });
 
+  it('does not let a tool followup bypass failed image hydration', async () => {
+    vi.mocked(getAssetBlob).mockResolvedValue(null);
+
+    await expect(requestCollaboratorReply({
+      api: visionProvider,
+      persona: null,
+      messages: [
+        imageMessage,
+        {
+          id: 'tool-followup',
+          role: 'system',
+          content: '图片属性工具已经执行，请继续回答用户。',
+          timestamp: 2,
+          origin: 'tool-runtime'
+        }
+      ]
+    })).rejects.toThrow('图片附件没有成功进入模型请求');
+
+    expect(requestAssistantReplyMock).not.toHaveBeenCalled();
+  });
+
   it('ignores the legacy global image understanding route for text-only chat providers', async () => {
     vi.mocked(getAssetBlob).mockResolvedValue(new Blob(['image-bytes'], { type: 'image/png' }));
 
     await expect(requestCollaboratorReply({
-      api: directMimoTextProvider,
+      api: textProvider,
       providers: [visionProvider],
       imageUnderstanding: {
         enabled: true,
@@ -131,7 +156,7 @@ describe('requestPipeline', () => {
 
     const reply = await requestCollaboratorReply({
       api: {
-        ...directMimoTextProvider,
+        ...textProvider,
         imageUnderstanding: {
           enabled: true,
           providerId: visionProvider.id
@@ -149,8 +174,8 @@ describe('requestPipeline', () => {
     }));
     expect(requestAssistantReplyMock).toHaveBeenNthCalledWith(2, expect.objectContaining({
       api: expect.objectContaining({
-        id: directMimoTextProvider.id,
-        model: directMimoTextProvider.model
+        id: textProvider.id,
+        model: textProvider.model
       })
     }));
     const mainRequestContext = requestAssistantReplyMock.mock.calls[1]?.[0]?.context;
@@ -165,7 +190,7 @@ describe('requestPipeline', () => {
 
     const reply = await requestCollaboratorReply({
       api: {
-        ...directMimoTextProvider,
+        ...textProvider,
         imageUnderstanding: {
           enabled: true,
           providerId: visionProvider.id,
